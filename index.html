@@ -746,7 +746,7 @@ canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%;z-index:
         <div class="mm-stat"><div class="sl">🏆 Best Score</div><div class="sv" id="mm-best">0</div></div>
         <div class="mm-stat"><div class="sl">🪙 Coins</div><div class="sv" id="mm-coins">0</div></div>
         <div class="mm-stat"><div class="sl">🚀 Boosts</div><div class="sv w" id="mm-boosts">0</div></div>
-        <div class="mm-stat"><div class="sl">🏃 Total Runs</div><div class="sv p" id="mm-runs">0</div></div>
+        <div class="mm-stat"><div class="sl">🏃 Total Runs</div><div class="sv p" id="mm-runs">650</div></div>
       </div>
       <div class="mm-char" id="mm-char" onclick="openShop('characters')">
         <div class="mm-char-av" id="mm-av">🏃</div>
@@ -770,7 +770,7 @@ canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%;z-index:
         <input id="playerNameInput" placeholder="Enter your runner name" autocomplete="off" spellcheck="false">
       </div>
       <div id="community-stats">
-        <div class="cs-item"><span>🎮</span><div><div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);">Total Runs</div><div class="cs-val" id="cs-runs">—</div></div></div>
+        <div class="cs-item"><span>🎮</span><div><div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);">Total Runs</div><div class="cs-val" id="cs-runs">650</div></div></div>
         <div class="cs-item"><span>🪙</span><div><div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);">Coins</div><div class="cs-val" id="cs-coins">—</div></div></div>
         <div class="cs-item"><div id="live-badge"><div class="live-dot"></div><span id="cs-live">— playing</span></div></div>
       </div>
@@ -1174,6 +1174,12 @@ let speedMult=1.0,speedBoostActive=false,speedBoostTimer=0;
 let doubleCoinsActive=false,doubleCoinsTimer=0;
 let nextMilestone=0;
 let xp=0,level=1,totalRuns=0,bestDistance=0;
+const RUNS_BASE=650; // displayed total runs start at 650 and grow by 1 for every finished run
+function getDisplayRuns(){return RUNS_BASE+(totalRuns||0);}
+function updateRunsDisplay(){
+  const v=getDisplayRuns().toLocaleString();
+  ['mm-runs','cs-runs'].forEach(id=>{const el=document.getElementById(id);if(el)el.innerText=v;});
+}
 let _pausedByVisibility=false;
 const MILESTONES=[1000,5000,10000,25000,50000,100000,250000,500000];
 const ghostTrail=[];
@@ -1507,6 +1513,8 @@ function init(){
   setupThreeJS();_initFpsLimit();createAssets();createPlayer();createPolice();
   _cacheDOM(); // cache all HUD DOM refs after elements exist
   setupInputs();
+  // Build the world + compile all shaders NOW (behind the loading screen) instead of on first Play
+  try{worldMgr=new WorldManager();worldMgr.prewarm();}catch(e){console.warn('world init failed',e);worldMgr=null;}
   fakeLoad().then(()=>{
     CG.loadingStop();
     document.getElementById('loading-screen').classList.add('hidden');
@@ -1686,6 +1694,7 @@ function setupThreeJS(){
     window.neonL=null;window.neonR=null;window.streetGlow=null;window.fillLight=null;
   }
   window.playerFill=null;
+  ObsLights.init();
 
   buildGround();buildSkybox();
 }
@@ -2686,6 +2695,47 @@ function createPlayer(){player=new Player();}
 function createPolice(){police=new Police();}
 
 // ── WORLD MANAGER ──
+// ── OBSTACLE LIGHT POOL ──
+// Adding/removing PointLights at runtime changes the light count, which forces three.js to
+// recompile EVERY lit material's shader (= the lag at the start of a run). Instead we keep a
+// fixed number of lights in the scene forever and just move them to the nearest obstacles.
+function _obsLight(g,color,intensity,distance,x,y,z){
+  const d={color,intensity,distance,position:{x,y,z}};
+  (g.userData.lights||(g.userData.lights=[])).push(d);
+  return d;
+}
+const ObsLights={
+  pool:[],N:6,_rec:[],
+  init(){
+    if(this.pool.length)return;
+    for(let i=0;i<this.N;i++){
+      const l=new THREE.PointLight(0xffffff,0,12);
+      l.position.set(0,-50,-50);l.visible=!window._noObsLights;
+      scene.add(l);this.pool.push(l);
+    }
+  },
+  setEnabled(on){this.pool.forEach(l=>{l.visible=on;});},
+  clear(){this.pool.forEach(l=>{l.intensity=0;});},
+  update(obs){
+    if(!this.pool.length||window._noObsLights)return;
+    const rec=this._rec;let n=0;
+    for(let i=0;i<obs.length;i++){
+      const m=obs[i].mesh,L=m.userData.lights;if(!L)continue;
+      for(let j=0;j<L.length;j++){
+        const d=L[j];let r=rec[n];if(!r)r=rec[n]={d:null,x:0,y:0,z:0};
+        r.d=d;r.x=m.position.x+d.position.x;r.y=m.position.y+d.position.y;r.z=m.position.z+d.position.z;n++;
+      }
+    }
+    for(let k=0;k<this.pool.length;k++){
+      const l=this.pool[k];let bi=-1,bd=1e9;
+      for(let j=0;j<n;j++){const r=rec[j];if(r.d===null)continue;const a=Math.abs(r.z);if(a<bd){bd=a;bi=j;}}
+      if(bi<0){l.intensity=0;continue;}
+      const r=rec[bi],d=r.d;r.d=null;
+      l.color.set(d.color);l.intensity=d.intensity;l.distance=d.distance;l.position.set(r.x,r.y,r.z);
+    }
+  }
+};
+
 class WorldManager{
   constructor(){
     this.obstacles=[];this.powerups=[];this.buildings=[];this.coins=[];this.boxes=[];
@@ -2693,9 +2743,29 @@ class WorldManager{
     for(let i=0;i<8;i++)this.spawnBuilding();
     this.spawnInitialCoins();
   }
+  // Compile every shader + upload every geometry once, behind the loading screen,
+  // so nothing has to be compiled in the middle of the first run.
+  prewarm(){
+    this.spawnTrain(-1);this.spawnLowB(0);this.spawnHighB(1);this.spawnSpikes(-1);this.spawnWrecker(0);this.spawnSpinner(1);
+    this._spawnJet(-1);this._spawnMag(0);this._spawnSnk(1);this._spawnBox(-1);this.spawnSpeedBoost(0);
+    this.obstacles.forEach(o=>{o.mesh.position.z=-14;});
+    [...this.powerups,...this.boxes].forEach(p=>{p.mesh.position.z=-14;});
+    ObsLights.update(this.obstacles);
+    try{
+      renderer.compile(scene,camera);renderer.render(scene,camera);
+      // also pre-compile the light-count variants used when the player blinks / police toggles
+      const pm=player&&player.mesh,qm=police&&police.mesh;
+      if(pm){pm.visible=false;renderer.compile(scene,camera);pm.visible=true;}
+      if(qm){const qv=qm.visible;qm.visible=false;renderer.compile(scene,camera);qm.visible=qv;}
+      renderer.render(scene,camera);
+    }catch(e){console.warn('prewarm failed',e);}
+    this.reset();
+  }
   reset(){
+    ObsLights.clear();
     [...this.obstacles,...this.powerups,...this.buildings,...this.coins,...this.boxes].forEach(o=>{
       const m=o.mesh||o;if(m&&m.parent)scene.remove(m);
+      if(m&&m.userData&&m.userData.glow&&m.userData.glow.parent)scene.remove(m.userData.glow);
     });
     this.obstacles=[];this.powerups=[];this.buildings=[];this.coins=[];this.boxes=[];
     this.spawnTimer=0;this.spawnInterval=2.2;this.buildingTimer=0;
@@ -2775,6 +2845,7 @@ class WorldManager{
         }
       }
     }
+    ObsLights.update(this.obstacles);
     // Move powerups
     for(let i=this.powerups.length-1;i>=0;i--){
       const p=this.powerups[i];p.mesh.position.z+=mv;p.mesh.rotation.y+=2.5*dt;p.mesh.rotation.x+=.5*dt;
@@ -3039,10 +3110,8 @@ class WorldManager{
     if(!MAT._trainFront)MAT._trainFront=new THREE.MeshStandardMaterial({color:0xffffff,emissive:0xffffff,emissiveIntensity:4});
     const frontL=new THREE.Mesh(new THREE.BoxGeometry(.5,.3,.1),MAT._trainFront);frontL.position.set(0,2.2,7.55);g.add(frontL);
     // Point lights — skip on mobile (emissive stripe handles the glow)
-    if(!window._noObsLights){
-      const wl=new THREE.PointLight(0xffffff,6,12);wl.position.set(0,2,7.4);g.add(wl);
-      const sl=new THREE.PointLight(nc,4,14);sl.position.set(0,4.2,0);g.add(sl);
-    }
+    _obsLight(g,0xffffff,6,12,0,2,7.4);
+    _obsLight(g,nc,4,14,0,4.2,0);
     g.position.set(x,0,SPAWNZ);scene.add(g);
     this.obstacles.push({mesh:g,type:'TRAIN',lane,width:2.6,height:4.2,depth:14});
     if(Math.random()>.4)for(let i=0;i<6;i++)this.createCoin(x,5.6,SPAWNZ+(i*2.5));
@@ -3071,7 +3140,7 @@ class WorldManager{
     const shaft=new THREE.Mesh(new THREE.BoxGeometry(.12,.5,.08),MAT.arrowWhite);shaft.position.set(0,1.5,.15);g.add(shaft);
     const head=new THREE.Mesh(new THREE.BoxGeometry(.32,.2,.08),MAT.arrowWhite);head.position.set(0,1.82,.15);g.add(head);
     // Point light — skip on low/mid mobile (emissive glow is enough)
-    if(!window._noObsLights){const pl2=new THREE.PointLight(0xff1100,5,9);pl2.position.y=1.05;g.add(pl2);}
+    _obsLight(g,0xff1100,5,9,0,1.05,0);
     g.position.set(x,0,SPAWNZ);scene.add(g);
     // height=1.15 → collision: py > 1.15+0.05=1.20 to clear
     // Standing py=0 → hits ✓  |  Rolling py=0,pTop=0.95 → 0.95<1.15 ... hmm
@@ -3102,7 +3171,7 @@ class WorldManager{
     // Duck arrow indicator pointing DOWN — teaches player to roll
     const shaft=new THREE.Mesh(new THREE.BoxGeometry(.12,.55,.08),MAT.arrowWhite);shaft.position.set(0,1.25,.15);g.add(shaft);
     const ah=new THREE.Mesh(new THREE.BoxGeometry(.32,.2,.08),MAT.arrowWhite);ah.position.set(0,.92,.15);ah.rotation.z=0;g.add(ah);
-    if(!window._noObsLights){const pl=new THREE.PointLight(0xff8800,5,10);pl.position.y=1.8;g.add(pl);}
+    _obsLight(g,0xff8800,5,10,0,1.8,0);
     g.position.set(x,0,SPAWNZ);scene.add(g);
     // barY=1.8 → collision uses this: pTop must be < barY-0.15 = 1.65 to clear
     // Rolling pTop ≈ 0.95 → 0.95 < 1.65 → CLEARS ✓
@@ -3165,7 +3234,7 @@ class WorldManager{
     glowDisk.position.y=.02;g.add(glowDisk);
 
     // Strong red point light — skip on mobile (emissive already glows)
-    if(!window._noObsLights){const pl=new THREE.PointLight(0xff1100,8,18);pl.position.set(0,3,0);g.add(pl);}
+    const pl=_obsLight(g,0xff1100,8,18,0,3,0); // BUGFIX: was block-scoped -> ReferenceError on g.userData.pl=pl
 
     g.userData.glowDisk=glowDisk;g.userData.pl=pl;g.userData.isSpike=true;
     g.position.set(x,0,SPAWNZ);scene.add(g);
@@ -3200,7 +3269,7 @@ class WorldManager{
     const ball=new THREE.Mesh(new THREE.SphereGeometry(.55,10,8),MAT.wreckerBall);
     ball.position.set(0,3,0);g.add(ball);
     // Glow
-    if(!window._noObsLights){const gl=new THREE.PointLight(0xff6600,6,10);gl.position.set(0,3,0);g.add(gl);}
+    const gl=_obsLight(g,0xff6600,6,10,0,3,0); // BUGFIX: was block-scoped -> ReferenceError on g.userData.glRef=gl
     g.userData.swingAngle=Math.random()*Math.PI*2;
     g.userData.swingSpeed=1.8+Math.random()*1.2;
     g.userData.ballRef=ball;g.userData.chainRef=chain;g.userData.glRef=gl;
@@ -3224,7 +3293,7 @@ class WorldManager{
       const tip=new THREE.Mesh(GEO.spinnerTip,MAT.spinnerTip);
       tip.position.set(tx,1.5,0);g.add(tip);
     });
-    if(!window._noObsLights){const gl=new THREE.PointLight(0xff3300,5,10);gl.position.y=1.5;g.add(gl);}
+    _obsLight(g,0xff3300,5,10,0,1.5,0);
     g.userData.spinSpeed=2.2+Math.random()*1.5;
     g.userData.armRef=arm;
     g.userData.isSpinner=true;
@@ -3526,7 +3595,7 @@ function triggerGameOver(){
   const pb=document.getElementById('pause-btn');if(pb)pb.style.display='none';
   totalCoins+=coins;
   const xpEarned=Math.floor(score/80)+coins*3+Math.floor(distance/8);
-  addXP(xpEarned);totalRuns++;
+  addXP(xpEarned);totalRuns++;updateRunsDisplay();saveData(true);
   if(distance>bestDistance)bestDistance=Math.floor(distance);
   DAILY.update('score',Math.floor(score));DAILY.update('distance',Math.floor(distance));
   DAILY.update('coins',coins);DAILY.update('combo',COMBO.maxMult);
@@ -3813,7 +3882,7 @@ function loadSaveData(){
     document.getElementById('mm-best').innerText=Math.floor(highScore).toLocaleString();
     document.getElementById('mm-coins').innerText=totalCoins.toLocaleString();
     document.getElementById('mm-boosts').innerText=inventory.headstart||0;
-    document.getElementById('mm-runs').innerText=totalRuns;
+    updateRunsDisplay();
     document.getElementById('mm-lvl').innerText='⭐  Lvl '+level+' · '+getLevelTitle(level);
   }catch(e){}
   loadCharData();
@@ -4024,7 +4093,7 @@ async function loadCommunityStats(){
     const el_runs=document.getElementById('cs-runs');
     const el_coins=document.getElementById('cs-coins');
     const el_live=document.getElementById('cs-live');
-    if(el_runs)el_runs.innerText=runs>0?runs.toLocaleString():'0';
+    updateRunsDisplay(); // same value as the main-menu stat
     if(el_coins)el_coins.innerText=coinsTotal>0?(coinsTotal>999?Math.floor(coinsTotal/1000)+'K':coinsTotal.toLocaleString()):'0';
     if(el_live)el_live.innerText=live+' playing';
   }catch(e){}
@@ -4194,6 +4263,7 @@ function applyTierSettings(tier){
   const fogDensity=tier==='low'?0.030:tier==='mid'?0.022:tier==='high'?0.018:0.014;
   if(scene.fog)scene.fog.density=fogDensity;
   window._noObsLights=tier==='low'||tier==='mid';
+  ObsLights.setEnabled(!window._noObsLights);
   const lightsOn=tier!=='low';
   if(window.neonL)    window.neonL.visible    =lightsOn;
   if(window.neonR)    window.neonR.visible    =lightsOn;
@@ -4211,7 +4281,7 @@ function applyTierSettings(tier){
 const DQS=(function(){
   const SIZE=90;
   const buf=new Float32Array(SIZE); // pre-allocated once, never causes GC
-  let head=0,count=0,sum=0,cooldown=0;
+  let head=0,count=0,sum=0,cooldown=5; // ignore the first 5s (warm-up frames are not representative)
   const TIERS=['low','mid','high','ultra'];
   return{
     update(dt){
